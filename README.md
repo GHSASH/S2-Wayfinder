@@ -2,6 +2,10 @@
 
 Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web map. The goal is to help plan new Wayspot/Pokestop nominations by showing S2 level 14 and 17 cells, occupied cells, and useful local planning information.
 
+
+![exemple](https://raw.githubusercontent.com/GHSASH/S2-Wayfinder/refs/heads/main/images/exemple.png)
+
+
 ## What The Script Does
 
 - Draws red S2 level 14 and level 17 cell lines.
