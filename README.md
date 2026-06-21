@@ -55,16 +55,10 @@ After installation, make sure the extension is enabled.
 
 After the repository is published on GitHub:
 
-1. Open `pokemon-go-s2-cells.user.js` on GitHub.
-2. Click `Raw`.
+1. Open [pokemon-go-s2-cells.user.js](https://github.com/GHSASH/S2-Wayfinder/raw/refs/heads/main/pokemon-go-s2-cells.user.js).
 3. Tampermonkey should open the installation screen automatically.
 4. Click `Install`.
 
-The raw URL will look like this:
-
-```text
-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPOSITORY/main/pokemon-go-s2-cells.user.js
-```
 
 ## How To Use
 
