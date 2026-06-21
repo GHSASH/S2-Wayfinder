@@ -9,6 +9,8 @@
 // @match        https://www.pokemongo.com/*/map*
 // @match        https://*.nianticlabs.com/gamesite/pgo*
 // @match        https://*.eng.nianticlabs.com/gamesite/pgo*
+// @updateURL    https://raw.githubusercontent.com/GHSASH/S2-Wayfinder/main/pokemon-go-s2-cells.user.js
+// @downloadURL  https://raw.githubusercontent.com/GHSASH/S2-Wayfinder/main/pokemon-go-s2-cells.user.js
 // @run-at       document-start
 // @grant        unsafeWindow
 // @author       GHSASH

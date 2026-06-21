@@ -3,7 +3,7 @@
 Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web map. The goal is to help plan new Wayspot/Pokestop nominations by showing S2 level 14 and 17 cells, occupied cells, and useful local planning information.
 
 
-![exemple](https://raw.githubusercontent.com/GHSASH/S2-Wayfinder/refs/heads/main/images/exemple.png)
+![example](https://raw.githubusercontent.com/GHSASH/S2-Wayfinder/refs/heads/main/images/example.png)
 
 
 ## What The Script Does
@@ -18,7 +18,6 @@ Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web
   - Pokestop count;
   - Gym count;
   - total loaded objects;
-  - expected stop/gym distribution;
   - how many Pokestops are missing before the next Gym threshold.
 
 ## Gym Rule Used
@@ -51,8 +50,8 @@ After installation, make sure the extension is enabled.
 After the repository is published on GitHub:
 
 1. Open [pokemon-go-s2-cells.user.js](https://github.com/GHSASH/S2-Wayfinder/raw/refs/heads/main/pokemon-go-s2-cells.user.js).
-3. Tampermonkey should open the installation screen automatically.
-4. Click `Install`.
+2. Tampermonkey should open the installation screen automatically.
+3. Click `Install`.
 
 #### Manually
 
