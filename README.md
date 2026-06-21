@@ -40,8 +40,7 @@ Counts depend on the objects already loaded by the map. To count Gyms and Pokest
 
 Install the Tampermonkey browser extension:
 
-- Chrome / Edge: search for `Tampermonkey` in the Chrome Web Store.
-- Firefox: search for `Tampermonkey` in Firefox Add-ons.
+- Chrome / Edge: Install `Tampermonkey` from the [Chrome Web Store](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
 
 After installation, make sure the extension is enabled.
 
