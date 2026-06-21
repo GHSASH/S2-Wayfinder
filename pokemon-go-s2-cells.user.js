@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.8
+// @version      0.5.9
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -27,6 +27,9 @@
     1: { color: "#ffd400", opacity: 0.30 },
     2: { color: "#ffe680", opacity: 0.18 },
   };
+  const EXTRA_MAP_DROP_TYPES = ["PGO_POKESTOP"];
+  const EXTRA_MAP_DROP_TYPES_MIN_S2_LEVEL = 13;
+  const EXTRA_MAP_DROP_TYPES_MAX_CELLS = 64;
   const DEFAULT_STATE = { 14: true, 17: true };
   const MIN_CELL_PIXELS = { 14: 16, 17: 14 };
   const MAX_CELLS = { 14: 1200, 17: 1400 };
@@ -55,6 +58,8 @@
   const occupiedL14Cells = new Map();
   const occupiedL17Cells = new Map();
   let occupiedCellsNotifyTimer = 0;
+  let expandedMapObjectRequestCount = 0;
+  let lastExpandedMapObjectRequest = null;
   let wrappedMapConstructor = null;
   let S2GridOverlayClass = null;
 
@@ -99,7 +104,9 @@
     if (typeof originalFetch !== "function" || originalFetch.__s2MapObjectCaptureWrapped) return;
 
     function wrappedFetch() {
-      const result = originalFetch.apply(this, arguments);
+      const args = Array.prototype.slice.call(arguments);
+      expandFetchMapObjectRequest(args);
+      const result = originalFetch.apply(this, args);
       try {
         result.then(captureMapObjectsFromResponse).catch(function () {});
       } catch (_) {
@@ -132,6 +139,11 @@
     };
 
     proto.send = function () {
+      const args = Array.prototype.slice.call(arguments);
+      if (args.length) {
+        const expandedBody = expandMapObjectRequestBody(args[0]);
+        if (expandedBody !== args[0]) args[0] = expandedBody;
+      }
       try {
         this.addEventListener("load", function () {
           try {
@@ -148,10 +160,95 @@
       } catch (_) {
         // Keep the page request untouched if event subscription fails.
       }
-      return originalSend.apply(this, arguments);
+      return originalSend.apply(this, args);
     };
 
     safeDefine(proto, "__s2MapObjectCaptureWrapped", { value: true });
+  }
+
+  function expandFetchMapObjectRequest(args) {
+    const init = args[1];
+    if (!init || typeof init !== "object" || !Object.prototype.hasOwnProperty.call(init, "body")) return;
+
+    const expandedBody = expandMapObjectRequestBody(init.body);
+    if (expandedBody === init.body) return;
+
+    args[1] = Object.assign({}, init, { body: expandedBody });
+  }
+
+  function expandMapObjectRequestBody(body) {
+    if (typeof body !== "string" || body.indexOf("realityChannelMapObjectsByS2CellsInput") === -1) return body;
+
+    let root;
+    try {
+      root = JSON.parse(body);
+    } catch (_) {
+      return body;
+    }
+
+    const requests = Array.isArray(root) ? root : [root];
+    let addedDropTypes = 0;
+    let expandedCellCount = 0;
+    let expandedLevel = null;
+
+    for (const request of requests) {
+      const input = request &&
+        request.variables &&
+        request.variables.realityChannelMapObjectsByS2CellsInput;
+      if (!input || !Array.isArray(input.sourcesByS2Cells)) continue;
+
+      const level = Number(input.s2CellLevel);
+      const cellCount = input.sourcesByS2Cells.length;
+      if (!Number.isInteger(level) || level < EXTRA_MAP_DROP_TYPES_MIN_S2_LEVEL) continue;
+      if (cellCount > EXTRA_MAP_DROP_TYPES_MAX_CELLS) continue;
+
+      let addedForInput = 0;
+      for (const sourceCell of input.sourcesByS2Cells) {
+        addedForInput += addExtraDropTypesToSourceCell(sourceCell);
+      }
+
+      if (addedForInput) {
+        addedDropTypes += addedForInput;
+        expandedLevel = level;
+        expandedCellCount += cellCount;
+      }
+    }
+
+    if (!addedDropTypes) return body;
+
+    expandedMapObjectRequestCount += 1;
+    lastExpandedMapObjectRequest = {
+      addedDropTypes,
+      cellCount: expandedCellCount,
+      level: expandedLevel,
+      timestamp: Date.now(),
+    };
+    return JSON.stringify(root);
+  }
+
+  function addExtraDropTypesToSourceCell(sourceCell) {
+    if (!sourceCell || !Array.isArray(sourceCell.sources)) return 0;
+
+    let added = 0;
+    for (const source of sourceCell.sources) {
+      if (!source || !Array.isArray(source.dropTypes)) continue;
+      if (!canExpandMapObjectSource(source)) continue;
+      for (const dropType of EXTRA_MAP_DROP_TYPES) {
+        if (source.dropTypes.indexOf(dropType) !== -1) continue;
+        source.dropTypes.push(dropType);
+        added += 1;
+      }
+    }
+    return added;
+  }
+
+  function canExpandMapObjectSource(source) {
+    const dropTypes = source.dropTypes;
+    return (
+      dropTypes.indexOf("PGO_GYM") !== -1 ||
+      dropTypes.indexOf("PGO_POWERSPOT") !== -1 ||
+      dropTypes.indexOf("PGO_ROUTE") !== -1
+    );
   }
 
   function captureMapObjectsFromResponse(response) {
@@ -1571,6 +1668,12 @@
     },
     get occupiedL14CellCount() {
       return occupiedL14Cells.size;
+    },
+    get expandedMapObjectRequestCount() {
+      return expandedMapObjectRequestCount;
+    },
+    get lastExpandedMapObjectRequest() {
+      return lastExpandedMapObjectRequest ? Object.assign({}, lastExpandedMapObjectRequest) : null;
     },
     wrappedMapConstructor: function () {
       return wrappedMapConstructor;
