@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.4
+// @version      0.5.5
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -34,7 +34,6 @@
   const IDLE_REDRAW_DELAY_MS = 40;
   const RESIZE_REDRAW_DELAY_MS = 120;
   const POST_IDLE_INTERACTION_SUPPRESS_MS = 250;
-  const FILTER_CLICK_MAX_AGE_MS = 1200;
   const VIEWPORT_PADDING_RATIO = 0.18;
   const MAP_PROTOTYPE_METHODS = [
     "setCenter",
@@ -46,39 +45,19 @@
     "getBounds",
     "getDiv",
   ];
-  const FILTER_TYPES = {
-    GYMS: "GYMS",
-    POKESTOPS: "POKESTOPS",
-  };
-  const FILTER_PAIR_TYPES = new Set([FILTER_TYPES.GYMS, FILTER_TYPES.POKESTOPS]);
-  const FILTER_BUTTON_CLASSES = {
-    gymIcon: "_gT-l6GfuOz",
-    pokestopIcon: "_h+ZX1vnjNv",
-    selected: "_CjCMiZ+P7t",
-    xIcon: "_r3A1EYTxcq",
-  };
 
   const state = loadState();
   const attachedMaps = new WeakSet();
   const pendingMapAttachments = new WeakSet();
-  const filterStateSubscribers = new Set();
   const occupiedCellsSubscribers = new Set();
   const occupiedL14Cells = new Map();
   const occupiedL17Cells = new Map();
-  let selectedFilterTypes = new Set(readInitialFilterTypesFromUrl());
-  let lastFilterClick = null;
   let occupiedCellsNotifyTimer = 0;
   let wrappedMapConstructor = null;
   let S2CanvasOverlayClass = null;
 
-  installMapFilterHook();
-  installFilterClickTracker();
   installMapObjectCaptureHooks();
   installGoogleHook();
-  const filterHookPoll = W.setInterval(installMapFilterHook, 25);
-  W.setTimeout(function () {
-    W.clearInterval(filterHookPoll);
-  }, 30000);
   const captureHookPoll = W.setInterval(installMapObjectCaptureHooks, 100);
   W.setTimeout(function () {
     W.clearInterval(captureHookPoll);
@@ -105,418 +84,6 @@
       W.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (_) {
       // Ignore storage failures in restricted frames.
-    }
-  }
-
-  function readInitialFilterTypesFromUrl() {
-    const types = [];
-    try {
-      const params = new URLSearchParams(W.location.search);
-      for (const value of params.values()) {
-        if (FILTER_PAIR_TYPES.has(value)) types.push(value);
-      }
-    } catch (_) {
-      // The hook below will read the real provider state once React loads.
-    }
-    return types;
-  }
-
-  function installMapFilterHook() {
-    try {
-      const chunkName = "webpackChunk_N_E";
-      const chunkQueue = W[chunkName] = W[chunkName] || [];
-
-      for (const payload of chunkQueue) {
-        wrapWebpackPayload(payload);
-      }
-
-      if (chunkQueue.__s2MapFilterPushAccessor) {
-        if (chunkQueue.push && !chunkQueue.push.__s2MapFilterPushWrapped) {
-          chunkQueue.push = chunkQueue.push;
-        }
-        return;
-      }
-
-      let pushValue = wrapWebpackPushFunction(chunkQueue.push);
-      try {
-        Object.defineProperty(chunkQueue, "push", {
-          configurable: true,
-          get: function () {
-            return pushValue;
-          },
-          set: function (nextPush) {
-            pushValue = wrapWebpackPushFunction(nextPush);
-          },
-        });
-        safeDefine(chunkQueue, "__s2MapFilterPushAccessor", { value: true });
-      } catch (_) {
-        chunkQueue.push = pushValue;
-      }
-    } catch (_) {
-      // If the webpack queue is unavailable, the DOM fallback still gates the grid.
-    }
-  }
-
-  function wrapWebpackPushFunction(originalPush) {
-    if (typeof originalPush !== "function" || originalPush.__s2MapFilterPushWrapped) return originalPush;
-
-    function wrappedPush() {
-      for (const payload of arguments) {
-        wrapWebpackPayload(payload);
-      }
-      return originalPush.apply(this, arguments);
-    }
-
-    copyStatics(originalPush, wrappedPush);
-    safeDefine(wrappedPush, "__s2MapFilterPushWrapped", { value: true });
-    return wrappedPush;
-  }
-
-  function wrapWebpackPayload(payload) {
-    if (!payload || !payload[1] || typeof payload[1] !== "object") return;
-    const modules = payload[1];
-    for (const moduleId of Object.keys(modules)) {
-      const factory = modules[moduleId];
-      if (typeof factory !== "function" || factory.__s2MapFilterFactoryWrapped) continue;
-
-      const source = functionSource(factory);
-      if (moduleId !== "36406" && !looksLikeContextHookModule(source)) {
-        continue;
-      }
-
-      const wrappedFactory = function (module, exports, require) {
-        factory.call(this, module, exports, require);
-        patchMapFilterExports(exports);
-      };
-      copyStatics(factory, wrappedFactory);
-      safeDefine(wrappedFactory, "__s2MapFilterFactoryWrapped", { value: true });
-      modules[moduleId] = wrappedFactory;
-    }
-  }
-
-  function functionSource(fn) {
-    try {
-      return Function.prototype.toString.call(fn);
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function looksLikeContextHookModule(source) {
-    return source.indexOf("useContext") !== -1 && source.length < 1200;
-  }
-
-  function patchMapFilterExports(exports) {
-    if (!exports || typeof exports !== "object") return;
-    const keys = Array.from(new Set(Object.keys(exports).concat(["Z", "default"])));
-    for (const key of keys) {
-      patchMapFilterExport(exports, key);
-    }
-  }
-
-  function patchMapFilterExport(exports, key) {
-    let original;
-    try {
-      original = exports[key];
-    } catch (_) {
-      return;
-    }
-    if (typeof original !== "function" || original.__s2MapFilterHookWrapped) return;
-
-    const wrapped = function () {
-      const value = original.apply(this, arguments);
-      return patchMapFilterContext(value);
-    };
-    copyStatics(original, wrapped);
-    safeDefine(wrapped, "__s2MapFilterHookWrapped", { value: true });
-
-    try {
-      exports[key] = wrapped;
-      return;
-    } catch (_) {
-      // Fall through to defineProperty for configurable exports.
-    }
-
-    try {
-      const descriptor = Object.getOwnPropertyDescriptor(exports, key);
-      if (descriptor && descriptor.configurable) {
-        Object.defineProperty(exports, key, {
-          configurable: true,
-          enumerable: descriptor.enumerable,
-          writable: true,
-          value: wrapped,
-        });
-      }
-    } catch (_) {
-      // Non-writable export, leave it unchanged.
-    }
-  }
-
-  function patchMapFilterContext(context) {
-    if (!context || typeof context !== "object") return context;
-    if (!Array.isArray(context.selectedMapFilters)) return context;
-    if (typeof context.setSelectedMapFilterTypes !== "function") return context;
-
-    setSelectedFilterTypes(context.selectedMapFilters);
-    if (context.setSelectedMapFilterTypes.__s2MapFilterSetterWrapped) return context;
-
-    const originalSetter = context.setSelectedMapFilterTypes;
-    const wrappedSetter = function (nextTypes) {
-      const adjustedTypes = adjustMapFilterTypesForClick(context, nextTypes);
-      if (adjustedTypes) {
-        setSelectedFilterTypes(adjustedTypes);
-        return originalSetter.call(this, adjustedTypes);
-      }
-
-      setSelectedFilterTypes(nextTypes);
-      return originalSetter.apply(this, arguments);
-    };
-
-    copyStatics(originalSetter, wrappedSetter);
-    safeDefine(wrappedSetter, "__s2MapFilterSetterWrapped", { value: true });
-    try {
-      context.setSelectedMapFilterTypes = wrappedSetter;
-    } catch (_) {
-      // If the context value is immutable, we keep read-only filter tracking.
-    }
-    return context;
-  }
-
-  function adjustMapFilterTypesForClick(context, nextTypes) {
-    const next = normalizeFilterTypes(nextTypes);
-    const clickedType = getRecentFilterInteractionType();
-    const currentPair = new Set(normalizeFilterTypes(context.selectedMapFilters).filter((type) => FILTER_PAIR_TYPES.has(type)));
-
-    if (next.length === 1 && FILTER_PAIR_TYPES.has(next[0])) {
-      currentPair.add(next[0]);
-      return Array.from(currentPair);
-    }
-
-    if (!next.length && clickedType && FILTER_PAIR_TYPES.has(clickedType)) {
-      if (currentPair.has(clickedType)) {
-        currentPair.delete(clickedType);
-      } else {
-        currentPair.add(clickedType);
-      }
-      return Array.from(currentPair);
-    }
-
-    return null;
-  }
-
-  function normalizeFilterTypes(filtersOrTypes) {
-    const values = Array.isArray(filtersOrTypes) ? filtersOrTypes : (filtersOrTypes ? [filtersOrTypes] : []);
-    const types = [];
-    for (const value of values) {
-      let type = null;
-      if (typeof value === "string") {
-        type = value;
-      } else if (value && typeof value.mapFilterType === "string") {
-        type = value.mapFilterType;
-      }
-
-      if (type && types.indexOf(type) === -1) {
-        types.push(type);
-      }
-    }
-    return types;
-  }
-
-  function setSelectedFilterTypes(filtersOrTypes) {
-    const next = new Set(normalizeFilterTypes(filtersOrTypes));
-    if (setsEqual(selectedFilterTypes, next)) return;
-    selectedFilterTypes = next;
-    notifyFilterStateSubscribers();
-  }
-
-  function subscribeToFilterState(handler) {
-    filterStateSubscribers.add(handler);
-    return function () {
-      filterStateSubscribers.delete(handler);
-    };
-  }
-
-  function notifyFilterStateSubscribers() {
-    for (const handler of Array.from(filterStateSubscribers)) {
-      try {
-        handler();
-      } catch (_) {
-        // A stale overlay should not prevent other overlays from updating.
-      }
-    }
-  }
-
-  function setsEqual(a, b) {
-    if (a.size !== b.size) return false;
-    for (const value of a) {
-      if (!b.has(value)) return false;
-    }
-    return true;
-  }
-
-  function installFilterClickTracker() {
-    const recordFilterClick = function (event) {
-      const type = inferFilterTypeFromElement(event.target);
-      if (!type) return;
-      lastFilterClick = { type, time: nowMs() };
-      W.setTimeout(refreshFilterStateFromDom, 80);
-      W.setTimeout(refreshFilterStateFromDom, 300);
-    };
-
-    try {
-      document.addEventListener("pointerdown", recordFilterClick, true);
-      document.addEventListener("click", recordFilterClick, true);
-    } catch (_) {
-      // Document may not be ready in unusual userscript sandboxes.
-    }
-
-    W.setTimeout(refreshFilterStateFromDom, 1000);
-    W.setTimeout(refreshFilterStateFromDom, 3000);
-  }
-
-  function getRecentFilterInteractionType() {
-    if (lastFilterClick && nowMs() - lastFilterClick.time <= FILTER_CLICK_MAX_AGE_MS) {
-      return lastFilterClick.type;
-    }
-
-    try {
-      return inferFilterTypeFromElement(document.activeElement);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function refreshFilterStateFromDom() {
-    const domState = readFilterTypesFromDom();
-    if (domState.seen) {
-      setSelectedFilterTypes(domState.types);
-    }
-  }
-
-  function isPokestopFilterActive() {
-    const domState = readFilterTypesFromDom();
-    if (domState.seen) {
-      return domState.types.indexOf(FILTER_TYPES.POKESTOPS) !== -1;
-    }
-    return selectedFilterTypes.has(FILTER_TYPES.POKESTOPS);
-  }
-
-  function readFilterTypesFromDom() {
-    const types = [];
-    let seen = false;
-    let candidates = [];
-
-    try {
-      candidates = Array.from(document.querySelectorAll("button,[role='button'],ion-button"));
-    } catch (_) {
-      return { seen: false, types };
-    }
-
-    for (const candidate of candidates) {
-      const type = inferFilterTypeFromButton(candidate);
-      if (!type) continue;
-      seen = true;
-      if (isFilterButtonSelected(candidate) && types.indexOf(type) === -1) {
-        types.push(type);
-      }
-    }
-
-    return { seen, types };
-  }
-
-  function inferFilterTypeFromElement(target) {
-    let element = target && target.nodeType === 1 ? target : target && target.parentElement;
-    for (let depth = 0; element && depth < 8; depth += 1, element = element.parentElement) {
-      if (element === document.body || element === document.documentElement) return null;
-
-      const iconType = inferFilterTypeFromClasses(element);
-      if (iconType) return iconType;
-
-      if (isButtonLike(element)) {
-        const buttonType = inferFilterTypeFromButton(element);
-        if (buttonType) return buttonType;
-      }
-    }
-    return null;
-  }
-
-  function inferFilterTypeFromButton(element) {
-    const iconType = inferFilterTypeFromClasses(element);
-    if (iconType) return iconType;
-
-    const text = normalizeFilterText(element.textContent);
-    if (/\bpokestops?\b/.test(text) || /\bpoke stops?\b/.test(text) || /\bpokeparadas?\b/.test(text) || /\bpoke paradas?\b/.test(text)) {
-      return FILTER_TYPES.POKESTOPS;
-    }
-    if (/\bgyms?\b/.test(text) || /\bginasios?\b/.test(text) || /\bgimnasios?\b/.test(text)) {
-      return FILTER_TYPES.GYMS;
-    }
-    return null;
-  }
-
-  function inferFilterTypeFromClasses(element) {
-    if (hasClassDeep(element, FILTER_BUTTON_CLASSES.pokestopIcon)) return FILTER_TYPES.POKESTOPS;
-    if (hasClassDeep(element, FILTER_BUTTON_CLASSES.gymIcon)) return FILTER_TYPES.GYMS;
-    return null;
-  }
-
-  function isFilterButtonSelected(element) {
-    if (classListContains(element, FILTER_BUTTON_CLASSES.selected)) return true;
-    if (hasClassDeep(element, FILTER_BUTTON_CLASSES.xIcon)) return true;
-    return element.getAttribute("aria-pressed") === "true" || element.getAttribute("aria-selected") === "true";
-  }
-
-  function isButtonLike(element) {
-    if (!element || !element.matches) return false;
-    try {
-      return element.matches("button,[role='button'],ion-button");
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function hasClassDeep(element, className) {
-    if (!element) return false;
-    if (classListContains(element, className)) return true;
-    if (!element.querySelectorAll) return false;
-
-    let descendants = [];
-    try {
-      descendants = element.querySelectorAll("[class]");
-    } catch (_) {
-      return false;
-    }
-
-    for (const descendant of descendants) {
-      if (classListContains(descendant, className)) return true;
-    }
-    return false;
-  }
-
-  function classListContains(element, className) {
-    try {
-      if (element.classList && element.classList.contains(className)) return true;
-    } catch (_) {
-      // Some SVG className values are animated objects.
-    }
-
-    try {
-      return String(element.getAttribute("class") || "").split(/\s+/).indexOf(className) !== -1;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function normalizeFilterText(text) {
-    try {
-      return String(text || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim();
-    } catch (_) {
-      return "";
     }
   }
 
@@ -1141,7 +708,6 @@
         this.lastMousePosition = null;
         this.isInteracting = false;
         this.suppressInteractionUntil = 0;
-        this.unsubscribeFilterState = null;
         this.unsubscribeOccupiedCells = null;
         this.onMapMouseMove = (event) => this.scheduleTooltipUpdate(event);
         this.onMapMouseLeave = () => this.hideTooltip();
@@ -1189,7 +755,6 @@
           this.resizeObserver.observe(mapDiv);
         }
 
-        this.unsubscribeFilterState = subscribeToFilterState(() => this.scheduleDraw(IDLE_REDRAW_DELAY_MS, true));
         this.unsubscribeOccupiedCells = subscribeToOccupiedCells(() => this.scheduleDraw(IDLE_REDRAW_DELAY_MS, true));
 
         const event = this.maps.event;
@@ -1219,9 +784,7 @@
           this.maps.event.removeListener(listener);
         }
         this.listeners = [];
-        if (this.unsubscribeFilterState) this.unsubscribeFilterState();
         if (this.unsubscribeOccupiedCells) this.unsubscribeOccupiedCells();
-        this.unsubscribeFilterState = null;
         this.unsubscribeOccupiedCells = null;
         if (this.resizeObserver) this.resizeObserver.disconnect();
         if (this.mapDiv) {
@@ -2010,12 +1573,6 @@
     attachToMap,
     get state() {
       return Object.assign({}, state);
-    },
-    get selectedFilterTypes() {
-      return Array.from(selectedFilterTypes);
-    },
-    get pokestopFilterActive() {
-      return isPokestopFilterActive();
     },
     get occupiedL17CellCount() {
       return occupiedL17Cells.size;
