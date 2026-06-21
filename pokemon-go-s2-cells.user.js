@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.5
+// @version      0.5.7
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -23,17 +23,15 @@
   const STORAGE_KEY = "pokemon-go-s2-cells-overlay";
   const MAP_MARKER = "__pokemonGoS2CellsOverlay";
   const RED = "#ff1f1f";
-  const OCCUPIED_FILL = "rgba(255,31,31,0.14)";
   const DEFAULT_STATE = { 14: true, 17: true };
   const MIN_CELL_PIXELS = { 14: 16, 17: 14 };
   const MAX_CELLS = { 14: 1200, 17: 1400 };
   const MAX_SAMPLES = 700;
   const MAX_CAPTURE_TEXT_CHARS = 12000000;
   const MAX_CAPTURE_NODES = 200000;
-  const ACTIVE_REDRAW_DELAY_MS = 220;
+  const ACTIVE_REDRAW_DELAY_MS = 32;
   const IDLE_REDRAW_DELAY_MS = 40;
   const RESIZE_REDRAW_DELAY_MS = 120;
-  const POST_IDLE_INTERACTION_SUPPRESS_MS = 250;
   const VIEWPORT_PADDING_RATIO = 0.18;
   const MAP_PROTOTYPE_METHODS = [
     "setCenter",
@@ -54,7 +52,7 @@
   const occupiedL17Cells = new Map();
   let occupiedCellsNotifyTimer = 0;
   let wrappedMapConstructor = null;
-  let S2CanvasOverlayClass = null;
+  let S2GridOverlayClass = null;
 
   installMapObjectCaptureHooks();
   installGoogleHook();
@@ -85,10 +83,6 @@
     } catch (_) {
       // Ignore storage failures in restricted frames.
     }
-  }
-
-  function nowMs() {
-    return W.performance && typeof W.performance.now === "function" ? W.performance.now() : Date.now();
   }
 
   function installMapObjectCaptureHooks() {
@@ -679,35 +673,36 @@
     if (!maps || !maps.OverlayView) return;
 
     attachedMaps.add(map);
-    const OverlayClass = getS2CanvasOverlayClass(maps);
+    const OverlayClass = getS2GridOverlayClass(maps);
     const overlay = new OverlayClass(map, maps);
     map[MAP_MARKER] = overlay;
     overlay.setMap(map);
     installControl(map, overlay, maps);
   }
 
-  function getS2CanvasOverlayClass(maps) {
-    if (S2CanvasOverlayClass) return S2CanvasOverlayClass;
+  function getS2GridOverlayClass(maps) {
+    if (S2GridOverlayClass) return S2GridOverlayClass;
 
-    S2CanvasOverlayClass = class S2CanvasOverlay extends maps.OverlayView {
+    S2GridOverlayClass = class S2GridOverlay extends maps.OverlayView {
       constructor(map, mapsApi) {
         super();
         this.map = map;
         this.maps = mapsApi;
-        this.canvas = null;
-        this.ctx = null;
         this.tooltip = null;
         this.mapDiv = null;
         this.resizeObserver = null;
         this.frame = 0;
         this.hoverFrame = 0;
         this.timer = 0;
-        this.forceNextDraw = false;
         this.listeners = [];
         this.visibleLevels = new Set();
+        this.gridPolygonsByLevel = {
+          14: new Map(),
+          17: new Map(),
+        };
+        this.occupiedFillPolygons = new Map();
         this.lastMousePosition = null;
         this.isInteracting = false;
-        this.suppressInteractionUntil = 0;
         this.unsubscribeOccupiedCells = null;
         this.onMapMouseMove = (event) => this.scheduleTooltipUpdate(event);
         this.onMapMouseLeave = () => this.hideTooltip();
@@ -716,18 +711,6 @@
       onAdd() {
         const mapDiv = this.map.getDiv();
         this.mapDiv = mapDiv;
-        this.canvas = document.createElement("canvas");
-        this.canvas.className = "pokemon-go-s2-cells-canvas";
-        Object.assign(this.canvas.style, {
-          position: "absolute",
-          inset: "0",
-          width: "100%",
-          height: "100%",
-          pointerEvents: "none",
-          zIndex: "80",
-        });
-        this.ctx = this.canvas.getContext("2d");
-        mapDiv.appendChild(this.canvas);
 
         this.tooltip = document.createElement("div");
         this.tooltip.className = "pokemon-go-s2-cells-tooltip";
@@ -791,58 +774,58 @@
           this.mapDiv.removeEventListener("mousemove", this.onMapMouseMove);
           this.mapDiv.removeEventListener("mouseleave", this.onMapMouseLeave);
         }
+        this.clearLevel(14);
+        this.clearLevel(17);
+        this.clearOccupiedFills();
         if (this.tooltip && this.tooltip.parentNode) this.tooltip.parentNode.removeChild(this.tooltip);
-        if (this.canvas && this.canvas.parentNode) this.canvas.parentNode.removeChild(this.canvas);
-        this.canvas = null;
-        this.ctx = null;
         this.tooltip = null;
         this.mapDiv = null;
       }
 
       beginInteraction(force) {
-        if (!force && nowMs() < this.suppressInteractionUntil) return;
         this.isInteracting = true;
         this.hideTooltip();
-        this.setCanvasVisible(false);
         this.scheduleDraw(ACTIVE_REDRAW_DELAY_MS, force);
       }
 
       endInteraction() {
         this.isInteracting = false;
-        this.suppressInteractionUntil = nowMs() + POST_IDLE_INTERACTION_SUPPRESS_MS;
         this.scheduleDraw(IDLE_REDRAW_DELAY_MS, true);
       }
 
       scheduleDraw(delay, force) {
-        this.forceNextDraw = this.forceNextDraw || Boolean(force);
-        if (this.timer) W.clearTimeout(this.timer);
-        this.timer = W.setTimeout(() => {
+        const wait = Math.max(0, delay || 0);
+        if (this.frame) return;
+        if (this.timer) {
+          if (!force || wait > 0) return;
+          W.clearTimeout(this.timer);
           this.timer = 0;
-          if (this.frame) return;
-          this.frame = W.requestAnimationFrame(() => {
-            const shouldForce = this.forceNextDraw;
-            this.frame = 0;
-            this.forceNextDraw = false;
-            this.render(shouldForce);
-          });
-        }, Math.max(0, delay || 0));
-      }
-
-      setCanvasVisible(visible) {
-        if (!this.canvas) return;
-        const visibility = visible ? "visible" : "hidden";
-        if (this.canvas.style.visibility !== visibility) {
-          this.canvas.style.visibility = visibility;
         }
-        if (!visible) this.hideTooltip();
+
+        const draw = () => {
+          this.timer = 0;
+          this.frame = W.requestAnimationFrame(() => {
+            this.frame = 0;
+            this.render();
+          });
+        };
+
+        if (wait > 0) {
+          this.timer = W.setTimeout(draw, wait);
+        } else {
+          draw();
+        }
       }
 
-      render(force) {
-        if (!this.canvas || !this.ctx) return;
+      render() {
+        if (!this.mapDiv) return;
         const enabledLevels = [17, 14].filter((level) => state[level]);
-        if (!enabledLevels.length || this.isInteracting) {
+        if (!enabledLevels.length) {
           this.visibleLevels = new Set();
-          this.setCanvasVisible(false);
+          this.clearLevel(14);
+          this.clearLevel(17);
+          this.clearOccupiedFills();
+          this.hideTooltip();
           return;
         }
 
@@ -855,15 +838,18 @@
         const height = Math.max(0, Math.round(rect.height));
         if (!width || !height) return;
 
-        resizeCanvas(this.canvas, this.ctx, width, height);
-        this.ctx.clearRect(0, 0, width, height);
-
         const visibleLevels = new Set();
+        if (enabledLevels.indexOf(17) === -1) {
+          this.clearLevel(17);
+          this.clearOccupiedFills();
+        }
+        if (enabledLevels.indexOf(14) === -1) this.clearLevel(14);
+
         for (const level of enabledLevels) {
           if (this.drawLevel(level, projection, width, height)) visibleLevels.add(level);
         }
         this.visibleLevels = visibleLevels;
-        this.setCanvasVisible(visibleLevels.size > 0);
+        if (!visibleLevels.has(17)) this.clearOccupiedFills();
         if (!this.canShowL14Tooltip()) this.hideTooltip();
       }
 
@@ -873,7 +859,11 @@
 
         const centerCell = latLngToCell(center.lat(), center.lng(), level);
         const cellPixels = estimateCellPixels(centerCell, projection, this.maps, width, height);
-        if (!Number.isFinite(cellPixels) || cellPixels < MIN_CELL_PIXELS[level]) return false;
+        if (!Number.isFinite(cellPixels) || cellPixels < MIN_CELL_PIXELS[level]) {
+          this.clearLevel(level);
+          if (level === 17) this.clearOccupiedFills();
+          return false;
+        }
 
         const cells = collectVisibleCells({
           level,
@@ -885,93 +875,94 @@
           cellPixels,
           maxCells: MAX_CELLS[level] + 1,
         });
-        if (!cells.length || cells.length > MAX_CELLS[level]) return false;
+        if (!cells.length || cells.length > MAX_CELLS[level]) {
+          this.clearLevel(level);
+          if (level === 17) this.clearOccupiedFills();
+          return false;
+        }
 
-        const vertexCache = new Map();
-        const projectedCache = new Map();
-        const getVertex = (face, cellLevel, i, j) => {
-          const key = face + "/" + cellLevel + "/" + i + "/" + j;
-          let vertex = vertexCache.get(key);
-          if (!vertex) {
-            vertex = vertexLatLng(face, cellLevel, i, j);
-            vertex.key = key;
-            vertexCache.set(key, vertex);
-          }
-          return vertex;
-        };
-        const projectVertex = (vertex) => {
-          if (!vertex) return null;
-          let point = projectedCache.get(vertex.key);
-          if (point === undefined) {
-            point = projectLatLng(vertex, projection, this.maps);
-            projectedCache.set(vertex.key, point);
-          }
-          return point;
-        };
-        const projectCellVertex = (cell, di, dj) => projectVertex(getVertex(cell.face, cell.level, cell.i + di, cell.j + dj));
-
-        const edges = new Map();
+        const polygons = this.gridPolygonsByLevel[level];
+        const wanted = new Set();
         for (const cell of cells) {
-          if (!cellTouchesViewport(cell, projectCellVertex, width, height)) continue;
-          addCellEdges(edges, cell, getVertex);
+          const key = cellKey(cell);
+          wanted.add(key);
+          this.ensureGridPolygon(level, key, cell);
         }
 
-        const ctx = this.ctx;
-        if (level === 17) {
-          this.fillOccupiedCells(cells, projectCellVertex, width, height);
+        for (const [key, polygon] of Array.from(polygons.entries())) {
+          if (!wanted.has(key)) {
+            polygon.setMap(null);
+            polygons.delete(key);
+          }
         }
 
-        ctx.save();
-        ctx.strokeStyle = RED;
-        ctx.globalAlpha = level === 14 ? 0.95 : 0.58;
-        ctx.lineWidth = level === 14 ? 1.8 : 1;
-        ctx.beginPath();
-
-        for (const edge of edges.values()) {
-          const a = projectVertex(edge.a);
-          const b = projectVertex(edge.b);
-          if (!a || !b) continue;
-          if (Math.abs(a.x - b.x) > width * 0.75 || Math.abs(a.y - b.y) > height * 0.75) continue;
-          if (!segmentTouchesViewport(a, b, width, height)) continue;
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-        }
-
-        ctx.stroke();
-        ctx.restore();
+        if (level === 17) this.updateOccupiedFills(cells);
         return true;
       }
 
-      fillOccupiedCells(cells, projectCellVertex, width, height) {
-        const ctx = this.ctx;
-        let hasFill = false;
+      ensureGridPolygon(level, key, cell) {
+        const polygons = this.gridPolygonsByLevel[level];
+        if (polygons.has(key)) return polygons.get(key);
 
-        ctx.save();
-        ctx.fillStyle = OCCUPIED_FILL;
-        ctx.beginPath();
+        const isL14 = level === 14;
+        const polygon = new this.maps.Polygon({
+          paths: cellToGooglePath(cell),
+          map: this.map,
+          clickable: false,
+          geodesic: true,
+          fillOpacity: 0,
+          strokeColor: RED,
+          strokeOpacity: isL14 ? 0.95 : 0.58,
+          strokeWeight: isL14 ? 1.8 : 1,
+          zIndex: isL14 ? 1400 : 1300,
+        });
+        polygons.set(key, polygon);
+        return polygon;
+      }
 
+      updateOccupiedFills(cells) {
+        const wanted = new Set();
         for (const cell of cells) {
           if (!isOccupiedL17Cell(cell)) continue;
+          const key = cellKey(cell);
+          wanted.add(key);
+          if (this.occupiedFillPolygons.has(key)) continue;
 
-          const points = [
-            projectCellVertex(cell, 0, 0),
-            projectCellVertex(cell, 1, 0),
-            projectCellVertex(cell, 1, 1),
-            projectCellVertex(cell, 0, 1),
-          ];
-          if (points.some((point) => !point)) continue;
-          if (!cellPolygonCanDraw(points, width, height)) continue;
-
-          ctx.moveTo(points[0].x, points[0].y);
-          ctx.lineTo(points[1].x, points[1].y);
-          ctx.lineTo(points[2].x, points[2].y);
-          ctx.lineTo(points[3].x, points[3].y);
-          ctx.closePath();
-          hasFill = true;
+          const polygon = new this.maps.Polygon({
+            paths: cellToGooglePath(cell),
+            map: this.map,
+            clickable: false,
+            geodesic: true,
+            fillColor: RED,
+            fillOpacity: 0.14,
+            strokeOpacity: 0,
+            strokeWeight: 0,
+            zIndex: 1200,
+          });
+          this.occupiedFillPolygons.set(key, polygon);
         }
 
-        if (hasFill) ctx.fill();
-        ctx.restore();
+        for (const [key, polygon] of Array.from(this.occupiedFillPolygons.entries())) {
+          if (!wanted.has(key)) {
+            polygon.setMap(null);
+            this.occupiedFillPolygons.delete(key);
+          }
+        }
+      }
+
+      clearLevel(level) {
+        const polygons = this.gridPolygonsByLevel[level];
+        for (const polygon of polygons.values()) {
+          polygon.setMap(null);
+        }
+        polygons.clear();
+      }
+
+      clearOccupiedFills() {
+        for (const polygon of this.occupiedFillPolygons.values()) {
+          polygon.setMap(null);
+        }
+        this.occupiedFillPolygons.clear();
       }
 
       canShowL14Tooltip() {
@@ -1073,20 +1064,7 @@
       }
     };
 
-    return S2CanvasOverlayClass;
-  }
-
-  function resizeCanvas(canvas, ctx, width, height) {
-    const dpr = Math.max(1, W.devicePixelRatio || 1);
-    const targetWidth = Math.round(width * dpr);
-    const targetHeight = Math.round(height * dpr);
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
-      canvas.style.width = width + "px";
-      canvas.style.height = height + "px";
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return S2GridOverlayClass;
   }
 
   function installControl(map, overlay, maps) {
@@ -1358,21 +1336,15 @@
     return cell.face + "/" + cell.level + "/" + cell.i + "/" + cell.j;
   }
 
-  function addCellEdges(edges, cell, getVertex) {
-    const f = cell.face;
-    const l = cell.level;
-    const i = cell.i;
-    const j = cell.j;
-
-    addEdge(edges, f, l, "h", j, i, getVertex(f, l, i, j), getVertex(f, l, i + 1, j));
-    addEdge(edges, f, l, "v", i + 1, j, getVertex(f, l, i + 1, j), getVertex(f, l, i + 1, j + 1));
-    addEdge(edges, f, l, "h", j + 1, i, getVertex(f, l, i + 1, j + 1), getVertex(f, l, i, j + 1));
-    addEdge(edges, f, l, "v", i, j, getVertex(f, l, i, j + 1), getVertex(f, l, i, j));
-  }
-
-  function addEdge(edges, face, level, axis, fixed, offset, a, b) {
-    const key = face + "/" + level + "/" + axis + "/" + fixed + "/" + offset;
-    if (!edges.has(key)) edges.set(key, { a, b });
+  function cellToGooglePath(cell) {
+    return [
+      vertexLatLng(cell.face, cell.level, cell.i, cell.j),
+      vertexLatLng(cell.face, cell.level, cell.i + 1, cell.j),
+      vertexLatLng(cell.face, cell.level, cell.i + 1, cell.j + 1),
+      vertexLatLng(cell.face, cell.level, cell.i, cell.j + 1),
+    ].map(function (point) {
+      return { lat: point.lat, lng: point.lng };
+    });
   }
 
   function estimateCellPixels(cell, projection, maps, width, height) {
@@ -1393,60 +1365,6 @@
     }
     if (!lengths.length) return 0;
     return lengths.reduce((sum, value) => sum + value, 0) / lengths.length;
-  }
-
-  function cellTouchesViewport(cell, projectCellVertex, width, height) {
-    const points = [
-      projectCellVertex(cell, 0, 0),
-      projectCellVertex(cell, 1, 0),
-      projectCellVertex(cell, 1, 1),
-      projectCellVertex(cell, 0, 1),
-    ].filter(Boolean);
-
-    if (points.length < 4) return false;
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const point of points) {
-      minX = Math.min(minX, point.x);
-      minY = Math.min(minY, point.y);
-      maxX = Math.max(maxX, point.x);
-      maxY = Math.max(maxY, point.y);
-    }
-    const margin = 48;
-    return maxX >= -margin && minX <= width + margin && maxY >= -margin && minY <= height + margin;
-  }
-
-  function segmentTouchesViewport(a, b, width, height) {
-    const margin = 48;
-    const minX = Math.min(a.x, b.x);
-    const maxX = Math.max(a.x, b.x);
-    const minY = Math.min(a.y, b.y);
-    const maxY = Math.max(a.y, b.y);
-    return maxX >= -margin && minX <= width + margin && maxY >= -margin && minY <= height + margin;
-  }
-
-  function cellPolygonCanDraw(points, width, height) {
-    for (let i = 0; i < points.length; i += 1) {
-      const a = points[i];
-      const b = points[(i + 1) % points.length];
-      if (Math.abs(a.x - b.x) > width * 0.75 || Math.abs(a.y - b.y) > height * 0.75) return false;
-    }
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const point of points) {
-      minX = Math.min(minX, point.x);
-      minY = Math.min(minY, point.y);
-      maxX = Math.max(maxX, point.x);
-      maxY = Math.max(maxY, point.y);
-    }
-
-    const margin = 48;
-    return maxX >= -margin && minX <= width + margin && maxY >= -margin && minY <= height + margin;
   }
 
   function projectLatLng(point, projection, maps) {
