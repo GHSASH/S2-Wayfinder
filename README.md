@@ -13,6 +13,7 @@ Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web
 - Renders the grid as native Google Maps vectors so it moves smoothly with the map.
 - Keeps the grid visible regardless of the site's map filters.
 - Fills level 17 cells that already contain a loaded Pokestop or Gym with a light transparent red.
+- Highlights level 14 cells in yellow when they are within one or two Pokestops of the next Gym threshold.
 - Shows a level 14 summary when hovering over a cell, including:
   - Pokestop count;
   - Gym count;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.7
+// @version      0.5.8
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -23,6 +23,10 @@
   const STORAGE_KEY = "pokemon-go-s2-cells-overlay";
   const MAP_MARKER = "__pokemonGoS2CellsOverlay";
   const RED = "#ff1f1f";
+  const NEAR_GYM_FILL = {
+    1: { color: "#ffd400", opacity: 0.30 },
+    2: { color: "#ffe680", opacity: 0.18 },
+  };
   const DEFAULT_STATE = { 14: true, 17: true };
   const MIN_CELL_PIXELS = { 14: 16, 17: 14 };
   const MAX_CELLS = { 14: 1200, 17: 1400 };
@@ -346,6 +350,13 @@
       nextGymNumber: gymRule.nextGymNumber,
       maxGymsReached: gymRule.maxGymsReached,
     };
+  }
+
+  function getL14NearGymHighlight(cell) {
+    const summary = getL14CellSummary(cell);
+    if (summary.total <= 0 || summary.maxGymsReached) return null;
+    if (summary.missingForNextGym <= 0 || summary.missingForNextGym >= 3) return null;
+    return NEAR_GYM_FILL[summary.missingForNextGym] || null;
   }
 
   function getGymRule(total) {
@@ -701,6 +712,7 @@
           17: new Map(),
         };
         this.occupiedFillPolygons = new Map();
+        this.nearGymFillPolygons = new Map();
         this.lastMousePosition = null;
         this.isInteracting = false;
         this.unsubscribeOccupiedCells = null;
@@ -777,6 +789,7 @@
         this.clearLevel(14);
         this.clearLevel(17);
         this.clearOccupiedFills();
+        this.clearNearGymFills();
         if (this.tooltip && this.tooltip.parentNode) this.tooltip.parentNode.removeChild(this.tooltip);
         this.tooltip = null;
         this.mapDiv = null;
@@ -825,6 +838,7 @@
           this.clearLevel(14);
           this.clearLevel(17);
           this.clearOccupiedFills();
+          this.clearNearGymFills();
           this.hideTooltip();
           return;
         }
@@ -843,13 +857,17 @@
           this.clearLevel(17);
           this.clearOccupiedFills();
         }
-        if (enabledLevels.indexOf(14) === -1) this.clearLevel(14);
+        if (enabledLevels.indexOf(14) === -1) {
+          this.clearLevel(14);
+          this.clearNearGymFills();
+        }
 
         for (const level of enabledLevels) {
           if (this.drawLevel(level, projection, width, height)) visibleLevels.add(level);
         }
         this.visibleLevels = visibleLevels;
         if (!visibleLevels.has(17)) this.clearOccupiedFills();
+        if (!visibleLevels.has(14)) this.clearNearGymFills();
         if (!this.canShowL14Tooltip()) this.hideTooltip();
       }
 
@@ -862,6 +880,7 @@
         if (!Number.isFinite(cellPixels) || cellPixels < MIN_CELL_PIXELS[level]) {
           this.clearLevel(level);
           if (level === 17) this.clearOccupiedFills();
+          if (level === 14) this.clearNearGymFills();
           return false;
         }
 
@@ -878,6 +897,7 @@
         if (!cells.length || cells.length > MAX_CELLS[level]) {
           this.clearLevel(level);
           if (level === 17) this.clearOccupiedFills();
+          if (level === 14) this.clearNearGymFills();
           return false;
         }
 
@@ -897,6 +917,7 @@
         }
 
         if (level === 17) this.updateOccupiedFills(cells);
+        if (level === 14) this.updateNearGymFills(cells);
         return true;
       }
 
@@ -950,6 +971,52 @@
         }
       }
 
+      updateNearGymFills(cells) {
+        const wanted = new Set();
+        for (const cell of cells) {
+          const highlight = getL14NearGymHighlight(cell);
+          if (!highlight) continue;
+
+          const key = cellKey(cell);
+          const path = cellToGooglePath(cell);
+          wanted.add(key);
+
+          const existing = this.nearGymFillPolygons.get(key);
+          if (existing) {
+            if (typeof existing.setPath === "function") {
+              existing.setPath(path);
+            } else {
+              existing.setOptions({ paths: path });
+            }
+            existing.setOptions({
+              fillColor: highlight.color,
+              fillOpacity: highlight.opacity,
+            });
+            continue;
+          }
+
+          const polygon = new this.maps.Polygon({
+            paths: path,
+            map: this.map,
+            clickable: false,
+            geodesic: true,
+            fillColor: highlight.color,
+            fillOpacity: highlight.opacity,
+            strokeOpacity: 0,
+            strokeWeight: 0,
+            zIndex: 1190,
+          });
+          this.nearGymFillPolygons.set(key, polygon);
+        }
+
+        for (const [key, polygon] of Array.from(this.nearGymFillPolygons.entries())) {
+          if (!wanted.has(key)) {
+            polygon.setMap(null);
+            this.nearGymFillPolygons.delete(key);
+          }
+        }
+      }
+
       clearLevel(level) {
         const polygons = this.gridPolygonsByLevel[level];
         for (const polygon of polygons.values()) {
@@ -963,6 +1030,13 @@
           polygon.setMap(null);
         }
         this.occupiedFillPolygons.clear();
+      }
+
+      clearNearGymFills() {
+        for (const polygon of this.nearGymFillPolygons.values()) {
+          polygon.setMap(null);
+        }
+        this.nearGymFillPolygons.clear();
       }
 
       canShowL14Tooltip() {
