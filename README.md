@@ -45,7 +45,17 @@ Install the Tampermonkey browser extension:
 
 After installation, make sure the extension is enabled.
 
-### 2. Install The Script Manually
+### 2. Install The Script
+
+#### From GitHub Raw (Recommended)
+
+After the repository is published on GitHub:
+
+1. Open [pokemon-go-s2-cells.user.js](https://github.com/GHSASH/S2-Wayfinder/raw/refs/heads/main/pokemon-go-s2-cells.user.js).
+3. Tampermonkey should open the installation screen automatically.
+4. Click `Install`.
+
+#### Manually
 
 1. Open the Tampermonkey dashboard.
 2. Click `Create a new script` or the `+` button.
@@ -55,13 +65,6 @@ After installation, make sure the extension is enabled.
 6. Save with `Ctrl + S`.
 7. Open or reload the Pokemon GO web map.
 
-### 3. Install From GitHub Raw
-
-After the repository is published on GitHub:
-
-1. Open [pokemon-go-s2-cells.user.js](https://github.com/GHSASH/S2-Wayfinder/raw/refs/heads/main/pokemon-go-s2-cells.user.js).
-3. Tampermonkey should open the installation screen automatically.
-4. Click `Install`.
 
 
 ## How To Use
