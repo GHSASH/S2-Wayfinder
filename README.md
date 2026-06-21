@@ -11,7 +11,7 @@ Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web
 - Draws red S2 level 14 and level 17 cell lines.
 - Adds `S2 L14` and `S2 L17` toggles directly on the map.
 - Hides the grid while the map is moving or zooming to improve performance.
-- Shows the grid only when the `Pokestop` map filter is enabled.
+- Keeps the grid visible independently of the map filter buttons.
 - Allows `Gym` and `Pokestop` filters to stay enabled at the same time.
 - Fills level 17 cells that already contain a loaded Pokestop or Gym with a light transparent red.
 - Shows a level 14 summary when hovering over a cell, including:
@@ -31,7 +31,7 @@ The level 14 hover tooltip uses this rule:
 | 6 | 4 stops, 2 gyms |
 | 20+ | 17+ stops, 3 gyms |
 
-Counts depend on the objects already loaded by the map. To count Gyms and Pokestops together, keep both the `Gym` and `Pokestop` filters enabled.
+Counts depend on the objects already loaded by the map. To count Gyms and Pokestops together, keep both the `Gym` and `Pokestop` filters enabled while the map loads nearby objects.
 
 ## Tampermonkey Installation
 
@@ -68,10 +68,9 @@ After the repository is published on GitHub:
 ## How To Use
 
 1. Open the Pokemon GO web map.
-2. Enable the `Pokestop` filter.
-3. If you also want Gym counts, enable `Gym` together with `Pokestop`.
-4. Use the `S2 L14` and `S2 L17` controls on the map.
-5. Hover over a level 14 cell to see the Pokestop/Gym summary.
+2. Use the `S2 L14` and `S2 L17` controls on the map.
+3. Optionally enable the `Gym` and `Pokestop` filters so the map loads objects used for occupied-cell counts.
+4. Hover over a level 14 cell to see the Pokestop/Gym summary.
 
 The level 14 tooltip only appears when level 17 cells are visible, to avoid visual clutter.
 

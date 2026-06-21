@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.3
+// @version      0.5.4
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -35,6 +35,17 @@
   const RESIZE_REDRAW_DELAY_MS = 120;
   const POST_IDLE_INTERACTION_SUPPRESS_MS = 250;
   const FILTER_CLICK_MAX_AGE_MS = 1200;
+  const VIEWPORT_PADDING_RATIO = 0.18;
+  const MAP_PROTOTYPE_METHODS = [
+    "setCenter",
+    "setZoom",
+    "panTo",
+    "fitBounds",
+    "getCenter",
+    "getZoom",
+    "getBounds",
+    "getDiv",
+  ];
   const FILTER_TYPES = {
     GYMS: "GYMS",
     POKESTOPS: "POKESTOPS",
@@ -49,6 +60,7 @@
 
   const state = loadState();
   const attachedMaps = new WeakSet();
+  const pendingMapAttachments = new WeakSet();
   const filterStateSubscribers = new Set();
   const occupiedCellsSubscribers = new Set();
   const occupiedL14Cells = new Map();
@@ -875,9 +887,8 @@
   function observeMaps(maps) {
     if (!maps || maps.__s2CellsObserved) return;
     safeDefine(maps, "__s2CellsObserved", { value: true });
-    hookNestedProperty(maps, "Map", function () {
-      tryWrapGoogleMap();
-    });
+    installMapConstructorHook(maps);
+    installImportLibraryHook(maps);
     tryWrapGoogleMap();
   }
 
@@ -910,29 +921,178 @@
 
   function tryWrapGoogleMap() {
     const maps = W.google && W.google.maps;
-    if (!maps || typeof maps.Map !== "function" || maps.Map.__s2CellsWrapped) return false;
+    if (!maps || typeof maps.Map !== "function") return false;
 
-    const OriginalMap = maps.Map;
+    const wrapped = wrapMapConstructor(maps.Map);
+    try {
+      if (maps.Map !== wrapped) maps.Map = wrapped;
+      wrappedMapConstructor = maps.Map;
+      return true;
+    } catch (_) {
+      wrappedMapConstructor = wrapped;
+      return false;
+    }
+  }
+
+  function installMapConstructorHook(maps) {
+    if (!maps || maps.__s2CellsMapAccessor) return;
+
+    let mapValue = maps.Map;
+    try {
+      Object.defineProperty(maps, "Map", {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          return mapValue;
+        },
+        set: function (next) {
+          mapValue = wrapMapConstructor(next);
+          if (mapValue) wrappedMapConstructor = mapValue;
+        },
+      });
+      safeDefine(maps, "__s2CellsMapAccessor", { value: true });
+      if (mapValue) maps.Map = mapValue;
+    } catch (_) {
+      try {
+        maps.Map = wrapMapConstructor(mapValue);
+      } catch (__) {
+        // Polling and prototype hooks may still catch an already-created map.
+      }
+    }
+  }
+
+  function installImportLibraryHook(maps) {
+    if (!maps || maps.__s2CellsImportLibraryAccessor) return;
+
+    let importValue = maps.importLibrary;
+    try {
+      Object.defineProperty(maps, "importLibrary", {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          return importValue;
+        },
+        set: function (next) {
+          importValue = wrapImportLibrary(next);
+        },
+      });
+      safeDefine(maps, "__s2CellsImportLibraryAccessor", { value: true });
+      if (importValue) maps.importLibrary = importValue;
+    } catch (_) {
+      try {
+        maps.importLibrary = wrapImportLibrary(importValue);
+      } catch (__) {
+        // Older Maps builds may not expose importLibrary.
+      }
+    }
+  }
+
+  function wrapImportLibrary(originalImportLibrary) {
+    if (typeof originalImportLibrary !== "function" || originalImportLibrary.__s2CellsImportLibraryWrapped) {
+      return originalImportLibrary;
+    }
+
+    const wrappedImportLibrary = function () {
+      const result = originalImportLibrary.apply(this, arguments);
+      try {
+        return Promise.resolve(result).then(function (library) {
+          patchImportedMapsLibrary(library);
+          return library;
+        });
+      } catch (_) {
+        return result;
+      }
+    };
+
+    copyStatics(originalImportLibrary, wrappedImportLibrary);
+    safeDefine(wrappedImportLibrary, "__s2CellsImportLibraryWrapped", { value: true });
+    return wrappedImportLibrary;
+  }
+
+  function patchImportedMapsLibrary(library) {
+    if (!library || typeof library !== "object" || typeof library.Map !== "function") return;
+    try {
+      library.Map = wrapMapConstructor(library.Map);
+    } catch (_) {
+      // Some module namespace objects are read-only.
+    }
+  }
+
+  function wrapMapConstructor(OriginalMap) {
+    if (typeof OriginalMap !== "function") return OriginalMap;
+    if (OriginalMap.__s2CellsWrapped) {
+      patchMapPrototype(OriginalMap);
+      return OriginalMap;
+    }
+
+    patchMapPrototype(OriginalMap);
 
     function WrappedMap() {
       const map = Reflect.construct(OriginalMap, arguments, new.target || WrappedMap);
-      W.setTimeout(function () {
-        attachToMap(map);
-      }, 0);
+      registerMapCandidate(map);
       return map;
     }
 
+    try {
+      Object.setPrototypeOf(WrappedMap, OriginalMap);
+    } catch (_) {
+      // Static copying below covers normal Maps constructor usage.
+    }
     WrappedMap.prototype = OriginalMap.prototype;
     copyStatics(OriginalMap, WrappedMap);
     safeDefine(WrappedMap, "__s2CellsWrapped", { value: true });
+    safeDefine(WrappedMap, "__s2CellsOriginalMap", { value: OriginalMap });
+    return WrappedMap;
+  }
 
-    try {
-      maps.Map = WrappedMap;
-      wrappedMapConstructor = WrappedMap;
-      return true;
-    } catch (_) {
-      return false;
+  function patchMapPrototype(MapCtor) {
+    const proto = MapCtor && MapCtor.prototype;
+    if (!proto || proto.__s2CellsPrototypePatched) return;
+
+    for (const method of MAP_PROTOTYPE_METHODS) {
+      const original = proto[method];
+      if (typeof original !== "function" || original.__s2CellsMapMethodWrapped) continue;
+
+      const wrapped = function () {
+        registerMapCandidate(this);
+        return original.apply(this, arguments);
+      };
+      copyStatics(original, wrapped);
+      safeDefine(wrapped, "__s2CellsMapMethodWrapped", { value: true });
+
+      try {
+        proto[method] = wrapped;
+      } catch (_) {
+        // Native descriptors may be locked in some Maps builds.
+      }
     }
+
+    safeDefine(proto, "__s2CellsPrototypePatched", { value: true });
+  }
+
+  function registerMapCandidate(map) {
+    if (!isGoogleMapLike(map)) return map;
+    if (attachedMaps.has(map) || map[MAP_MARKER] || pendingMapAttachments.has(map)) return map;
+    pendingMapAttachments.add(map);
+    try {
+      W.setTimeout(function () {
+        pendingMapAttachments.delete(map);
+        attachToMap(map);
+      }, 0);
+    } catch (_) {
+      pendingMapAttachments.delete(map);
+      attachToMap(map);
+    }
+    return map;
+  }
+
+  function isGoogleMapLike(map) {
+    return Boolean(
+      map &&
+      typeof map.getDiv === "function" &&
+      typeof map.getCenter === "function" &&
+      typeof map.getZoom === "function"
+    );
   }
 
   function copyStatics(source, target) {
@@ -1117,7 +1277,7 @@
       render(force) {
         if (!this.canvas || !this.ctx) return;
         const enabledLevels = [17, 14].filter((level) => state[level]);
-        if (!enabledLevels.length || this.isInteracting || !isPokestopFilterActive()) {
+        if (!enabledLevels.length || this.isInteracting) {
           this.visibleLevels = new Set();
           this.setCanvasVisible(false);
           return;
@@ -1154,11 +1314,13 @@
 
         const cells = collectVisibleCells({
           level,
+          map: this.map,
           projection,
           maps: this.maps,
           width,
           height,
           cellPixels,
+          maxCells: MAX_CELLS[level] + 1,
         });
         if (!cells.length || cells.length > MAX_CELLS[level]) return false;
 
@@ -1256,8 +1418,7 @@
           !this.isInteracting &&
           state[14] &&
           state[17] &&
-          this.visibleLevels.has(17) &&
-          isPokestopFilterActive()
+          this.visibleLevels.has(17)
         );
       }
 
@@ -1418,6 +1579,42 @@
   }
 
   function collectVisibleCells(options) {
+    const boundsCells = collectVisibleCellsFromBounds(options);
+    if (boundsCells.length) return boundsCells;
+    return collectVisibleCellsBySampling(options);
+  }
+
+  function collectVisibleCellsFromBounds(options) {
+    const { level, map, maxCells } = options;
+    const boundsBox = getPaddedMapBoundsBox(map);
+    const center = map && map.getCenter && map.getCenter();
+    if (!boundsBox || !center) return [];
+
+    const limit = Math.max(1, maxCells || MAX_CELLS[level] + 1);
+    const start = latLngToCell(center.lat(), center.lng(), level);
+    const cells = [];
+    const queued = new Set([cellKey(start)]);
+    const queue = [start];
+
+    for (let index = 0; index < queue.length && cells.length <= limit; index += 1) {
+      const cell = queue[index];
+      if (!cellIntersectsBoundsBox(cell, boundsBox)) continue;
+
+      cells.push(cell);
+      if (cells.length > limit) break;
+
+      for (const neighbor of getCellNeighbors(cell)) {
+        const key = cellKey(neighbor);
+        if (queued.has(key)) continue;
+        queued.add(key);
+        queue.push(neighbor);
+      }
+    }
+
+    return cells;
+  }
+
+  function collectVisibleCellsBySampling(options) {
     const { level, projection, maps, width, height, cellPixels } = options;
     const cells = new Map();
     const step = clamp(cellPixels * 0.75, 24, 160);
@@ -1456,18 +1653,142 @@
   }
 
   function addCellAndNeighbors(cells, cell) {
-    const size = 1 << cell.level;
     for (let dj = -1; dj <= 1; dj += 1) {
       for (let di = -1; di <= 1; di += 1) {
-        const i = cell.i + di;
-        const j = cell.j + dj;
-        if (i < 0 || j < 0 || i >= size || j >= size) continue;
-        const key = cell.face + "/" + cell.level + "/" + i + "/" + j;
+        const neighbor = cellFromFaceIJ(cell.face, cell.level, cell.i + di, cell.j + dj);
+        const key = cellKey(neighbor);
         if (!cells.has(key)) {
-          cells.set(key, { face: cell.face, level: cell.level, i, j });
+          cells.set(key, neighbor);
         }
       }
     }
+  }
+
+  function getPaddedMapBoundsBox(map) {
+    const bounds = map && map.getBounds && map.getBounds();
+    if (!bounds || typeof bounds.getNorthEast !== "function" || typeof bounds.getSouthWest !== "function") return null;
+
+    const ne = bounds.getNorthEast();
+    const sw = bounds.getSouthWest();
+    if (!ne || !sw) return null;
+
+    let north = Number(ne.lat());
+    let south = Number(sw.lat());
+    let east = wrapLng(Number(ne.lng()));
+    let west = wrapLng(Number(sw.lng()));
+    if (!Number.isFinite(north) || !Number.isFinite(south) || !Number.isFinite(east) || !Number.isFinite(west)) return null;
+
+    if (south > north) {
+      const tmp = south;
+      south = north;
+      north = tmp;
+    }
+
+    let lngSpan = east - west;
+    if (lngSpan < 0) lngSpan += 360;
+
+    const latPad = Math.max(0.0001, Math.abs(north - south) * VIEWPORT_PADDING_RATIO);
+    const lngPad = Math.max(0.0001, lngSpan * VIEWPORT_PADDING_RATIO);
+
+    return {
+      north: Math.min(90, north + latPad),
+      south: Math.max(-90, south - latPad),
+      east: wrapLng(east + lngPad),
+      west: wrapLng(west - lngPad),
+    };
+  }
+
+  function cellIntersectsBoundsBox(cell, box) {
+    const points = [
+      cellCenterLatLng(cell),
+      vertexLatLng(cell.face, cell.level, cell.i, cell.j),
+      vertexLatLng(cell.face, cell.level, cell.i + 1, cell.j),
+      vertexLatLng(cell.face, cell.level, cell.i + 1, cell.j + 1),
+      vertexLatLng(cell.face, cell.level, cell.i, cell.j + 1),
+    ];
+
+    for (const point of points) {
+      if (pointInBoundsBox(point, box)) return true;
+    }
+
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    const lngs = [];
+    for (const point of points) {
+      minLat = Math.min(minLat, point.lat);
+      maxLat = Math.max(maxLat, point.lat);
+      lngs.push(point.lng);
+    }
+
+    if (minLat > box.north || maxLat < box.south) return false;
+    return lngRangeIntersectsBounds(lngs, box);
+  }
+
+  function pointInBoundsBox(point, box) {
+    return (
+      point &&
+      point.lat >= box.south &&
+      point.lat <= box.north &&
+      lngInBoundsBox(point.lng, box)
+    );
+  }
+
+  function lngInBoundsBox(lng, box) {
+    const wrapped = wrapLng(lng);
+    if (box.west <= box.east) return wrapped >= box.west && wrapped <= box.east;
+    return wrapped >= box.west || wrapped <= box.east;
+  }
+
+  function lngRangeIntersectsBounds(lngs, box) {
+    const west = box.west;
+    let east = box.east;
+    if (east < west) east += 360;
+
+    let minLng = Infinity;
+    let maxLng = -Infinity;
+    for (const lng of lngs) {
+      const unwrapped = unwrapLngNear(lng, west);
+      minLng = Math.min(minLng, unwrapped);
+      maxLng = Math.max(maxLng, unwrapped);
+    }
+
+    return maxLng >= west && minLng <= east;
+  }
+
+  function unwrapLngNear(lng, reference) {
+    let value = wrapLng(lng);
+    while (value - reference > 180) value -= 360;
+    while (value - reference < -180) value += 360;
+    return value;
+  }
+
+  function wrapLng(lng) {
+    return ((((lng + 180) % 360) + 360) % 360) - 180;
+  }
+
+  function getCellNeighbors(cell) {
+    return [
+      cellFromFaceIJ(cell.face, cell.level, cell.i - 1, cell.j),
+      cellFromFaceIJ(cell.face, cell.level, cell.i + 1, cell.j),
+      cellFromFaceIJ(cell.face, cell.level, cell.i, cell.j - 1),
+      cellFromFaceIJ(cell.face, cell.level, cell.i, cell.j + 1),
+    ];
+  }
+
+  function cellFromFaceIJ(face, level, i, j) {
+    const size = 1 << level;
+    if (i >= 0 && j >= 0 && i < size && j < size) {
+      return { face, level, i, j };
+    }
+
+    const s = (i + 0.5) / size;
+    const t = (j + 0.5) / size;
+    const xyz = normalize(faceUvToXyz(face, stToUv(s), stToUv(t)));
+    const wrappedFace = xyzToFace(xyz);
+    const uv = faceXyzToUv(wrappedFace, xyz);
+    const wrappedI = clamp(Math.floor(uvToSt(uv.u) * size), 0, size - 1);
+    const wrappedJ = clamp(Math.floor(uvToSt(uv.v) * size), 0, size - 1);
+    return { face: wrappedFace, level, i: wrappedI, j: wrappedJ };
   }
 
   function cellKey(cell) {
@@ -1600,6 +1921,14 @@
   }
 
   function vertexLatLng(face, level, i, j) {
+    return cellLatLngAt(face, level, i, j);
+  }
+
+  function cellCenterLatLng(cell) {
+    return cellLatLngAt(cell.face, cell.level, cell.i + 0.5, cell.j + 0.5);
+  }
+
+  function cellLatLngAt(face, level, i, j) {
     const size = 1 << level;
     const u = stToUv(i / size);
     const v = stToUv(j / size);
