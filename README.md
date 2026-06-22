@@ -9,9 +9,10 @@ Tampermonkey userscript that adds a visual S2 cell overlay to the Pokemon GO web
 ## What The Script Does
 
 - Draws red S2 level 14 and level 17 cell lines.
-- Adds `S2 L14` and `S2 L17` toggles directly on the map.
+- Adds `S2 L14`, `S2 L17`, and optional `20m` radius toggles directly on the map.
 - Renders the grid as native Google Maps vectors so it moves smoothly with the map.
 - Keeps the grid visible regardless of the site's map filters.
+- Draws optional 20 meter circles around loaded Pokestops and Gyms.
 - Fills level 17 cells that already contain a loaded Pokestop or Gym with a light transparent red.
 - Highlights level 14 cells in yellow when they are within one or two Pokestops of the next Gym threshold.
 - Expands lower-zoom map object requests to include Pokestops when the request size is within a safe limit.
@@ -69,7 +70,7 @@ After the repository is published on GitHub:
 ## How To Use
 
 1. Open the Pokemon GO web map.
-2. Use the `S2 L14` and `S2 L17` controls on the map.
+2. Use the `S2 L14`, `S2 L17`, and `20m` controls on the map.
 3. Hover over a level 14 cell to see the Pokestop/Gym summary.
 
 The level 14 tooltip only appears when level 17 cells are visible, to avoid visual clutter.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S2 Wayfinder
 // @namespace    local.pokemon-go.s2-cells
-// @version      0.5.9
+// @version      0.6.0
 // @description  Draw red S2 level 14 and 17 cell overlays on the Pokemon GO/Campfire game map.
 // @match        https://pokemongo.com/gamemap*
 // @match        https://www.pokemongo.com/gamemap*
@@ -23,6 +23,8 @@
   const STORAGE_KEY = "pokemon-go-s2-cells-overlay";
   const MAP_MARKER = "__pokemonGoS2CellsOverlay";
   const RED = "#ff1f1f";
+  const INTERACTION_RADIUS_METERS = 20;
+  const INTERACTION_RADIUS_COLOR = "#00a6ff";
   const NEAR_GYM_FILL = {
     1: { color: "#ffd400", opacity: 0.30 },
     2: { color: "#ffe680", opacity: 0.18 },
@@ -30,7 +32,7 @@
   const EXTRA_MAP_DROP_TYPES = ["PGO_POKESTOP"];
   const EXTRA_MAP_DROP_TYPES_MIN_S2_LEVEL = 13;
   const EXTRA_MAP_DROP_TYPES_MAX_CELLS = 64;
-  const DEFAULT_STATE = { 14: true, 17: true };
+  const DEFAULT_STATE = { 14: true, 17: true, interactionRadius: false };
   const MIN_CELL_PIXELS = { 14: 16, 17: 14 };
   const MAX_CELLS = { 14: 1200, 17: 1400 };
   const MAX_SAMPLES = 700;
@@ -55,6 +57,7 @@
   const attachedMaps = new WeakSet();
   const pendingMapAttachments = new WeakSet();
   const occupiedCellsSubscribers = new Set();
+  const occupiedMapObjects = new Map();
   const occupiedL14Cells = new Map();
   const occupiedL17Cells = new Map();
   let occupiedCellsNotifyTimer = 0;
@@ -402,6 +405,10 @@
 
   function addOccupiedMapObject(object) {
     const objectKey = object.type + ":" + object.id;
+    if (!occupiedMapObjects.has(objectKey)) {
+      occupiedMapObjects.set(objectKey, object);
+    }
+
     const l17Cell = latLngToCell(object.lat, object.lng, 17);
     const added = addObjectToCellStats(occupiedL17Cells, l17Cell, object, objectKey);
     if (!added) return false;
@@ -409,6 +416,17 @@
     const l14Cell = latLngToCell(object.lat, object.lng, 14);
     addObjectToCellStats(occupiedL14Cells, l14Cell, object, objectKey);
     return true;
+  }
+
+  function getVisibleOccupiedMapObjects(map) {
+    const boundsBox = getPaddedMapBoundsBox(map);
+    if (!boundsBox) return Array.from(occupiedMapObjects.values());
+
+    const objects = [];
+    for (const object of occupiedMapObjects.values()) {
+      if (pointInBoundsBox(object, boundsBox)) objects.push(object);
+    }
+    return objects;
   }
 
   function addObjectToCellStats(statsMap, cell, object, objectKey) {
@@ -810,6 +828,7 @@
         };
         this.occupiedFillPolygons = new Map();
         this.nearGymFillPolygons = new Map();
+        this.interactionRadiusCircles = new Map();
         this.lastMousePosition = null;
         this.isInteracting = false;
         this.unsubscribeOccupiedCells = null;
@@ -887,6 +906,7 @@
         this.clearLevel(17);
         this.clearOccupiedFills();
         this.clearNearGymFills();
+        this.clearInteractionRadiusCircles();
         if (this.tooltip && this.tooltip.parentNode) this.tooltip.parentNode.removeChild(this.tooltip);
         this.tooltip = null;
         this.mapDiv = null;
@@ -930,12 +950,14 @@
       render() {
         if (!this.mapDiv) return;
         const enabledLevels = [17, 14].filter((level) => state[level]);
-        if (!enabledLevels.length) {
+        const showInteractionRadius = Boolean(state.interactionRadius);
+        if (!enabledLevels.length && !showInteractionRadius) {
           this.visibleLevels = new Set();
           this.clearLevel(14);
           this.clearLevel(17);
           this.clearOccupiedFills();
           this.clearNearGymFills();
+          this.clearInteractionRadiusCircles();
           this.hideTooltip();
           return;
         }
@@ -950,6 +972,12 @@
         if (!width || !height) return;
 
         const visibleLevels = new Set();
+        if (showInteractionRadius) {
+          this.updateInteractionRadiusCircles();
+        } else {
+          this.clearInteractionRadiusCircles();
+        }
+
         if (enabledLevels.indexOf(17) === -1) {
           this.clearLevel(17);
           this.clearOccupiedFills();
@@ -1114,6 +1142,44 @@
         }
       }
 
+      updateInteractionRadiusCircles() {
+        const wanted = new Set();
+        const objects = getVisibleOccupiedMapObjects(this.map);
+        for (const object of objects) {
+          const key = object.type + ":" + object.id;
+          wanted.add(key);
+
+          const center = { lat: object.lat, lng: object.lng };
+          const existing = this.interactionRadiusCircles.get(key);
+          if (existing) {
+            existing.setCenter(center);
+            existing.setRadius(INTERACTION_RADIUS_METERS);
+            continue;
+          }
+
+          const circle = new this.maps.Circle({
+            center,
+            map: this.map,
+            clickable: false,
+            fillColor: INTERACTION_RADIUS_COLOR,
+            fillOpacity: 0.08,
+            radius: INTERACTION_RADIUS_METERS,
+            strokeColor: INTERACTION_RADIUS_COLOR,
+            strokeOpacity: 0.72,
+            strokeWeight: 1.4,
+            zIndex: 1250,
+          });
+          this.interactionRadiusCircles.set(key, circle);
+        }
+
+        for (const [key, circle] of Array.from(this.interactionRadiusCircles.entries())) {
+          if (!wanted.has(key)) {
+            circle.setMap(null);
+            this.interactionRadiusCircles.delete(key);
+          }
+        }
+      }
+
       clearLevel(level) {
         const polygons = this.gridPolygonsByLevel[level];
         for (const polygon of polygons.values()) {
@@ -1134,6 +1200,13 @@
           polygon.setMap(null);
         }
         this.nearGymFillPolygons.clear();
+      }
+
+      clearInteractionRadiusCircles() {
+        for (const circle of this.interactionRadiusCircles.values()) {
+          circle.setMap(null);
+        }
+        this.interactionRadiusCircles.clear();
       }
 
       canShowL14Tooltip() {
@@ -1248,6 +1321,7 @@
       boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
       color: "#111",
       display: "flex",
+      flexWrap: "wrap",
       gap: "8px",
       margin: "10px",
       padding: "6px 8px",
@@ -1257,6 +1331,7 @@
 
     control.appendChild(createToggle(14, overlay));
     control.appendChild(createToggle(17, overlay));
+    control.appendChild(createInteractionRadiusToggle(overlay));
 
     maps.OverlayView.preventMapHitsAndGesturesFrom(control);
     map.controls[maps.ControlPosition.TOP_LEFT].push(control);
@@ -1284,6 +1359,35 @@
 
     const text = document.createElement("span");
     text.textContent = "S2 L" + level;
+
+    label.appendChild(input);
+    label.appendChild(text);
+    return label;
+  }
+
+  function createInteractionRadiusToggle(overlay) {
+    const label = document.createElement("label");
+    Object.assign(label.style, {
+      alignItems: "center",
+      cursor: "pointer",
+      display: "flex",
+      gap: "4px",
+      whiteSpace: "nowrap",
+    });
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(state.interactionRadius);
+    input.style.accentColor = INTERACTION_RADIUS_COLOR;
+    input.addEventListener("change", function () {
+      state.interactionRadius = input.checked;
+      saveState();
+      overlay.scheduleDraw(0, true);
+    });
+
+    const text = document.createElement("span");
+    text.textContent = "20m";
+    text.title = "20 meter circles around loaded Pokestops and Gyms";
 
     label.appendChild(input);
     label.appendChild(text);
